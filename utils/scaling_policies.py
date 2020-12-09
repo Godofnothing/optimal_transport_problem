@@ -22,11 +22,12 @@ class EpsPolicy_pow:
     p - power
     '''
     
-    def __init__(self, high, p, low = 0):
+    def __init__(self, high, p, alpha = 0.5, low = 0):
         self.high = high
         self.p = p
         self.low = low
+        self.alpha = alpha
         
     def __call__(self, n):
-        return self.low + (self.high - self.low) / (n + 1) ** self.p
+        return self.low + (self.high - self.low) / (self.alpha * n + 1) ** self.p
         

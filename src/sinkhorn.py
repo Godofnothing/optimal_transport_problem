@@ -10,6 +10,8 @@ import jax
 import jax.numpy as jnp
 from jax import jit
 
+from utils.sparsify import *
+
 def sinkhorn():
     pass
 
@@ -17,72 +19,105 @@ def get_K(C, reg):
     if isinstance(C, np.ndarray):
         # Faster exponent
         K = np.divide(C, -reg)
-        K = np.exp(K)
-        return K
+        return np.exp(K)
     elif isinstance(C, jax.interpreters.xla.DeviceArray):
         K = jnp.divide(C, -reg)
-        K = jnp.exp(K)
-        return K
+        return jnp.exp(K)
     else:
         raise NotImplementedError(f"The type {type(C)} is not supported!")
 
-def sparsify(K, min_nnz = 5):
-    '''
-    This function eliminates the elements which are smaller that the maximal element in the matrix,
- 
-    Parameters
-    ----------
-    K : ndarray
-        K - the input matrix
-    min_nnz:
-        the minimal number of elements in row or column to be preserved
-    
-    '''
-    cond = np.bitwise_or(K >= -np.partition(-K, min_nnz - 1, axis = 1)[:, min_nnz - 1][:, None], 
-                         K >= -np.partition(-K, min_nnz - 1, axis = 0)[min_nnz - 1, :][None, :])
-    
-    return spsp.csr_matrix(np.where(cond, K, 0))
+def get_K_stab(C, alpha, beta, reg):
+    if isinstance(C, np.ndarray):
+        # Faster exponent
+        K = np.divide(C - alpha[:, None] - beta[None, :], -reg)
+        return np.exp(K)
+    elif isinstance(C, jax.interpreters.xla.DeviceArray):
+        K = jnp.divide(C - alpha[:, None] - beta[None, :], -reg)
+        return jnp.exp(K)
+    else:
+        raise NotImplementedError(f"The type {type(C)} is not supported!")
+        
+def truncate_kernel(K, sparsification_strategy, thr = 1e-10, min_nnz = 5):
+    if sparsification_strategy == "threshold":
+        return sparsify(K, thr)
+    elif sparsification_strategy == 'keep_n_largest':
+        return from_largest_row_col(K, min_nnz)
+    else:
+        raise NotImplementedError("unknown spasification strategy")
 
 def sinkhorn_knopp(C, reg, a = None, b = None, 
-                   max_iter = 1e3, eps = 1e-9, 
+                   max_iter = 1e3, tol = 1e-9, 
                    log = False, verbose = False, log_interval = 10, 
-                   make_sparse = False, min_nnz = 5):
+                   make_sparse = False, sparsification_strategy = "threshold", 
+                   min_nnz = 5, thr = 1e-10):
     '''
-    This function eliminates the elements which are smaller that the maximal element in the matrix,
-    but keeps some fixed number of elements, specified by the user. 
+    The vanilla Sinkhorn-Knopp iterations
     
     Parameters
     ----------
-    C : ndarray
-        the const matrix
-    reg:
+    C : ndarray (dim_a, dim_b)
+        the cost matrix
+    reg: float
         the regularization term
     a : ndarray, shape (dim_a,)
         samples weights in the source domain
     b : ndarray, shape (dim_b,)
         samples weights in the target domain
     max_iter:
-        maximal number of iterations
-        
-    make_sparse:
-        if True remove small elements from the matrix
-    elim_eps (only if make_sparse = True):
-        the threshold below which the element is eliminated, unless preserved by the another condition
-    min_nnz (only if make_sparse = True):
-        the minimal number of elements to be preserved
-    
+        maximal number of iterations   
+    tol: float
+        the addmissible value of deviation ||a_tilde - a||_2 + ||b_tilde - b||_2, 
+        where a_tilde, b_tilde are estimates, obtained from the projection of the ot_matrix
+    log: bool 
+        whether to track or not error
+    verbose: bool
+        print err history
+    log_interval: bool
+        record error each log_interval steps
+    make_sparse: bool
+        if True create sparse matrix following one of the strategies
+    sparsification_strategy: string
+        "threshold" - eliminate element below a certain threshold
+        "keep_n_largest" - keep only n_largest elements in row and column
+    min_nnz (only if make_sparse = True and sparsification_strategy = "keep_n_largest"): int
+        keep n_largest elements in row and column 
+    thr (only if make_sparse = True and sparsification_strategy = "threshold"): float
+        the threshold below which the element is eliminated
     '''
     
     if isinstance(C, jax.interpreters.xla.DeviceArray):
         K = get_K(C, reg)
-        return sinkhorn_knopp_jax(K, a, b, max_iter, eps, log, verbose, log_interval)
+        return sinkhorn_knopp_jax(K, a, b, max_iter, tol, log, verbose, log_interval)
     elif isinstance(C, np.ndarray) or isinstance(C, spsp.csr_matrix):
         K = get_K(C, reg)
         if make_sparse:
-            K = sparsify(K, min_nnz)
-        return sinkhorn_knopp_numpy(K, a, b, max_iter, eps, log, verbose, log_interval)
+            K = truncate_kernel(K, sparsification_strategy, thr, min_nnz)
+                
+        return sinkhorn_knopp_numpy(K, a, b, max_iter, tol, log, verbose, log_interval)
     else:
         raise NotImplementedError(f"The type {type(C)} is not supported!")
+        
+def sinkhorn_stabilized(C, reg, a = None, b = None, 
+                        max_iter = 1e3, tau=1e3, tol = 1e-9, 
+                        warmstart=None, log = False, verbose = False, 
+                        log_interval = 10, 
+                        make_sparse = False, sparsification_strategy = "threshold", 
+                        min_nnz = 5, thr = 1e-10):
+    '''
+    The stabilized Sinkhorn-Knopp iterations
+    
+    Parameters
+    ----------
+    For complete description look at sinkhorn_stabilized_numpy
+    '''
+    if isinstance(C, jax.interpreters.xla.DeviceArray):
+        return sinkhorn_stabilized_jax(C, reg, a, b, max_iter, tau, tol, warmstart, log, verbose, log_interval)
+    elif isinstance(C, np.ndarray) or isinstance(C, spsp.csr_matrix):
+        return sinkhorn_stabilized_numpy(C, reg, a, b, max_iter, tau, tol, warmstart, log, verbose, log_interval, 
+                                         make_sparse, sparsification_strategy, min_nnz, thr)
+    else:
+        raise NotImplementedError(f"The type {type(C)} is not supported!")
+    
 
 def singularity_check_numpy(u, v):
     #check, whether there was a division by zero
@@ -93,7 +128,7 @@ def singularity_check_jax(u, v):
     #check, whether there was a division by zero
     return jnp.any(jnp.isnan(u)) or jnp.any(jnp.isnan(v)) or jnp.any(jnp.isinf(u)) or jnp.any(jnp.isinf(v))
 
-def sinkhorn_knopp_numpy(K, a = None, b = None, max_iter = 1e3, eps = 1e-9, log = False, verbose = False, log_interval = 10):
+def sinkhorn_knopp_numpy(K, a = None, b = None, max_iter = 1e3, tol = 1e-9, log = False, verbose = False, log_interval = 10):
     r'''
     Parameters
     ----------
@@ -130,7 +165,7 @@ def sinkhorn_knopp_numpy(K, a = None, b = None, max_iter = 1e3, eps = 1e-9, log 
     #in order not to calculate each time
     K_T = K.T
     
-    while(err > eps and cpt < max_iter):
+    while(err > tol and cpt < max_iter):
         uprev = u
         vprev = v
         
@@ -145,10 +180,11 @@ def sinkhorn_knopp_numpy(K, a = None, b = None, max_iter = 1e3, eps = 1e-9, log 
             v = vprev
             break
         if cpt % log_interval == 0:
-            #residual on the iteration
-            r = u * (K @ v)
-            # violation of marginal
-            err = np.linalg.norm(r - a)  
+            # current approximations
+            a_tilde = u * (K @ v)
+            b_tilde = v * (K_T @ u)
+            # violation of marginals
+            err = np.linalg.norm(a_tilde - a) + np.linalg.norm(b_tilde - b)
             
             if log:
                 log['err'].append(err)
@@ -167,7 +203,7 @@ def sinkhorn_knopp_numpy(K, a = None, b = None, max_iter = 1e3, eps = 1e-9, log 
         return ot_matrix
 
 #version for the dense matrices
-def sinkhorn_knopp_jax(K, a = None, b = None, max_iter = 1e3, eps = 1e-9, log = False, verbose = False, log_interval = 10):
+def sinkhorn_knopp_jax(K, a = None, b = None, max_iter = 1e3, tol = 1e-9, log = False, verbose = False, log_interval = 10):
   
     # if the weights are not specified, assign them uniformly
     if a is None:
@@ -192,7 +228,7 @@ def sinkhorn_knopp_jax(K, a = None, b = None, max_iter = 1e3, eps = 1e-9, log = 
     #in order not to calculate each time
     K_T = K.T
     
-    while(err > eps and cpt < max_iter):
+    while(err > tol and cpt < max_iter):
         # backup variables for the case of singularity
         uprev = u
         vprev = v
@@ -208,10 +244,11 @@ def sinkhorn_knopp_jax(K, a = None, b = None, max_iter = 1e3, eps = 1e-9, log = 
              v = vprev
              break
         if cpt % log_interval == 0:
-            #residual on the iteration
-            r = u * (K @ v) 
-            # violation of marginal
-            err = jnp.linalg.norm(r - a)  
+            # current approximations
+            a_tilde = u * (K @ v)
+            b_tilde = v * (K_T @ u)
+            # violation of marginals
+            err = np.linalg.norm(a_tilde - a) + np.linalg.norm(b_tilde - b)
             
             if log:
                 log['err'].append(err)
@@ -224,8 +261,10 @@ def sinkhorn_knopp_jax(K, a = None, b = None, max_iter = 1e3, eps = 1e-9, log = 
     else:
         return ot_matrix
     
-def sinkhorn_stabilized_numpy(C, reg, a, b, max_iter=1000, tau=1e3, eps=1e-9,
-                              warmstart=None, verbose=False, log_interval=20, log=False):
+def sinkhorn_stabilized_numpy(C, reg, a, b, max_iter=1000, tau=1e3, tol=1e-9,
+                              warmstart=None, log=False, verbose=False, log_interval=20, 
+                              make_sparse = False, sparsification_strategy = "threshold", 
+                              min_nnz = 5, thr = 1e-10):
     r"""
     Solve the entropic regularization OT problem with log stabilization
     ----------
@@ -237,18 +276,31 @@ def sinkhorn_stabilized_numpy(C, reg, a, b, max_iter=1000, tau=1e3, eps=1e-9,
         samples weights in the source domain
     b : ndarray, shape (dim_b,)
         samples in the target domain
-    tau : float
-        thershold for max value in u or v for log scaling
-    warmstart : tible of vectors
-        if given then sarting values for alpha an beta log scalings
     max_iter : int, optional
         Max number of iterations
-    eps : float, optional
-        Stop threshol on error (>0)
+    tau : float
+        thershold for max value in u or v for log scaling
+    tol : float, optional
+        Stop threshold on error (>0)
+    warmstart : tible of vectors
+        if given then sarting values for alpha an beta log scalings
     verbose : bool, optional
         Print information along iterations
     log : bool, optional
         record log if True
+    verbose: bool
+        print err history
+    log_interval: bool
+        record error each log_interval steps
+    make_sparse: bool
+        if True create sparse matrix following one of the strategies
+    sparsification_strategy: string
+        "threshold" - eliminate element below a certain threshold
+        "keep_n_largest" - keep only n_largest elements in row and column
+    min_nnz (only if make_sparse = True and sparsification_strategy = "keep_n_largest"): int
+        keep n_largest elements in row and column 
+    thr (only if make_sparse = True and sparsification_strategy = "threshold"): float
+        the threshold below which the element is eliminated
     Returns
     -------
     gamma : ndarray, shape (dim_a, dim_b)
@@ -277,48 +329,44 @@ def sinkhorn_stabilized_numpy(C, reg, a, b, max_iter=1000, tau=1e3, eps=1e-9,
         alpha, beta = warmstart
 
     u, v = np.ones(dim_a) / dim_a, np.ones(dim_b) / dim_b
-    
-    def get_K(alpha, beta):
-        """log space computation"""
-        K = np.divide(C - alpha[:, None] - beta[None, :], -reg)
-        return np.exp(K)
 
     def get_Gamma(alpha, beta, u, v):
         """log space gamma computation"""
-        Gamma = np.divide(C - alpha[:, None] - beta[None, :], -reg)
-        return np.exp(Gamma + np.log(u[:, None]) + np.log(v[None, :]))
+        return u[:, None] * get_K_stab(C, alpha, beta, reg) * v[None, :]
 
-    K = get_K(alpha, beta)
-    loop = 1
+    K = get_K_stab(C, alpha, beta, reg)
+    if make_sparse:
+                K = truncate_kernel(K, sparsification_strategy, thr, min_nnz)
+            
     cpt = 0
     err = 1
-    while loop:
+    while True:
         uprev = u
         vprev = v
 
         # sinkhorn update
-        v = b / ((K.T @ u) + 1e-16)
-        u = a / ((K @ v)   + 1e-16)
+        v = b / (K.T @ u + 1e-16)
+        u = a / (K @ v   + 1e-16)
 
-        # remove numerical problems and store them in K
+        #print(np.abs(u).max(), np.abs(v).max(), np.abs(u).min(), np.abs(v).min())
+
+        # absorption iteration
         if np.abs(u).max() > tau or np.abs(v).max() > tau:
             alpha, beta = alpha + reg * np.log(u), beta + reg * np.log(v)
             u, v = np.ones(dim_a) / dim_a, np.ones(dim_b) / dim_b
-            K = get_K(alpha, beta)
+            K = get_K_stab(C, alpha, beta, reg)
+            if make_sparse:
+                K = truncate_kernel(K, sparsification_strategy, thr, min_nnz)
 
         if cpt % log_interval == 0:
-            # we can speed up the process by checking for the error only all
-            # the 10th iterations
+            # we can speed up the process by checking for the error only log_interval iterations
             gamma = get_Gamma(alpha, beta, u, v)
-            err = np.linalg.norm((np.sum(gamma, axis=0) - b))
+            err = np.linalg.norm((np.sum(gamma, axis=0) - b)) + np.linalg.norm((np.sum(gamma, axis=1) - a))
             if log:
                 log['err'].append(err)
 
-        if err <= eps:
-            loop = False
-
-        if cpt >= max_iter:
-            loop = False
+        if err <= tol or cpt >= max_iter:
+            break
 
         if np.any(np.isnan(u)) or np.any(np.isnan(v)):
             # we have reached the machine precision
@@ -331,14 +379,14 @@ def sinkhorn_stabilized_numpy(C, reg, a, b, max_iter=1000, tau=1e3, eps=1e-9,
         cpt = cpt + 1
         
     if log:
-        log['alpha'] = alpha
-        log['beta'] = beta
+        log['alpha'] = alpha + reg * np.log(u)
+        log['beta']  = beta  + reg * np.log(v)
         return get_Gamma(alpha, beta, u, v), log
     else:
         return get_Gamma(alpha, beta, u, v)
     
-def sinkhorn_stabilized_jax(C, reg, a, b, max_iter=1000, tau=1e3, eps=1e-9,
-                            warmstart=None, verbose=False, log_interval=20, log=False):
+def sinkhorn_stabilized_jax(C, reg, a, b, max_iter=1000, tau=1e3, tol=1e-9,
+                            warmstart=None, log=False, verbose=False, log_interval=20):
     r"""
     Solve the entropic regularization OT problem with log stabilization
     ----------
@@ -350,18 +398,20 @@ def sinkhorn_stabilized_jax(C, reg, a, b, max_iter=1000, tau=1e3, eps=1e-9,
         samples weights in the source domain
     b : ndarray, shape (dim_b,)
         samples in the target domain
-    tau : float
-        thershold for max value in u or v for log scaling
-    warmstart : tible of vectors
-        if given then sarting values for alpha an beta log scalings
     max_iter : int, optional
         Max number of iterations
-    eps : float, optional
+    tau : float
+        thershold for max value in u or v for log scaling
+    tol : float, optional
         Stop threshol on error (>0)
-    verbose : bool, optional
-        Print information along iterations
+    warmstart : tible of vectors
+        if given then sarting values for alpha an beta log scalings
     log : bool, optional
         record log if True
+    verbose : bool, optional
+        Print information along iterations
+    log_interval: bool
+        record error each log_interval steps
     Returns
     -------
     gamma : ndarray, shape (dim_a, dim_b)
@@ -390,22 +440,16 @@ def sinkhorn_stabilized_jax(C, reg, a, b, max_iter=1000, tau=1e3, eps=1e-9,
         alpha, beta = warmstart
 
     u, v = jnp.ones(dim_a) / dim_a, jnp.ones(dim_b) / dim_b
-    
-    def get_K(alpha, beta):
-        """log space computation"""
-        K = jnp.divide(C - alpha[:, None] - beta[None, :], -reg)
-        return jnp.exp(K)
 
     def get_Gamma(alpha, beta, u, v):
         """log space gamma computation"""
-        Gamma = jnp.divide(C - alpha[:, None] - beta[None, :], -reg)
-        return jnp.exp(Gamma + jnp.log(u[:, None]) + jnp.log(v[None, :]))
+        return u[:, None] * get_K_stab(C, alpha, beta, reg) * v[None, :]
 
-    K = get_K(alpha, beta)
-    loop = 1
+    K = get_K_stab(C, alpha, beta, reg)
+    
     cpt = 0
     err = 1
-    while loop:
+    while True:
         uprev = u
         vprev = v
 
@@ -417,21 +461,17 @@ def sinkhorn_stabilized_jax(C, reg, a, b, max_iter=1000, tau=1e3, eps=1e-9,
         if jnp.abs(u).max() > tau or jnp.abs(v).max() > tau:
             alpha, beta = alpha + reg * jnp.log(u), beta + reg * jnp.log(v)
             u, v = jnp.ones(dim_a) / dim_a, jnp.ones(dim_b) / dim_b
-            K = get_K(alpha, beta)
+            K = get_K_stab(C, alpha, beta, reg)
 
         if cpt % log_interval == 0:
-            # we can speed up the process by checking for the error only all
-            # the 10th iterations
+            # we can speed up the process by checking for the error only log_interval iterations
             gamma = get_Gamma(alpha, beta, u, v)
-            err = jnp.linalg.norm((np.sum(gamma, axis=0) - b))
+            err = jnp.linalg.norm((jnp.sum(gamma, axis=0) - b)) + jnp.linalg.norm((jnp.sum(gamma, axis=1) - a))
             if log:
                 log['err'].append(err)
 
-        if err <= eps:
-            loop = False
-
-        if cpt >= max_iter:
-            loop = False
+        if err <= tol or cpt >= max_iter:
+            break
 
         if jnp.any(jnp.isnan(u)) or jnp.any(jnp.isnan(v)):
             # we have reached the machine precision
@@ -444,15 +484,17 @@ def sinkhorn_stabilized_jax(C, reg, a, b, max_iter=1000, tau=1e3, eps=1e-9,
         cpt = cpt + 1
         
     if log:
-        log['alpha'] = alpha
-        log['beta'] = beta
+        log['alpha'] = alpha + reg * jnp.log(u)
+        log['beta']  = beta  + reg * jnp.log(v)
         return get_Gamma(alpha, beta, u, v), log
     else:
         return get_Gamma(alpha, beta, u, v)
     
 
-def sinkhorn_epsilon_scaling(C, a, b, eps_fn, max_outer_iter=100, max_inner_iter=100, min_outer_iter = 10,
-                             tau = 1e3, eps=1e-9, warmstart=None, verbose=False, log_interval=10, log=False):
+def sinkhorn_epsilon_scaling(C, a, b, eps_fn, max_outer_iter=100, min_outer_iter = 10, max_inner_iter=100, 
+                             tau = 1e3, tol=1e-9, warmstart=None, log=False, verbose=False, log_interval=10,
+                             make_sparse = False, sparsification_strategy = "threshold", 
+                             min_nnz = 5, thr = 1e-10):
     r"""
     Solve the entropic regularization optimal transport problem with log
     stabilization and epsilon scaling.
@@ -471,20 +513,31 @@ def sinkhorn_epsilon_scaling(C, a, b, eps_fn, max_outer_iter=100, max_inner_iter
         Max number of iterations
     min_outer_iter: int, optional
         Min number of iterations
-    tau : float
-        thershold for max value in u or v for log scaling
-    warmstart : tuple of vectors
-        if given then sarting values for alpha an beta log scalings
     max_inner_iter : int, optional
         Max number of iterations in the inner slog stabilized sinkhorn
+    tau : float
+        thershold for max value in u or v for log scaling
+    tol : float, optional
+        Stop threshol on error (>0)
+    warmstart : tuple of vectors
+        if given then sarting values for alpha an beta log scalings
     eps_fn : int, optional
         the epsilon scaling policy
-    eps : float, optional
-        Stop threshol on error (>0)
-    verbose : bool, optional
-        Print information along iterations
     log : bool, optional
         record log if True
+    verbose : bool, optional
+        Print information along iterations
+    Привет, в общем я разобрался log_interval: bool
+        record error each log_interval steps
+    make_sparse: bool
+        if True create sparse matrix following one of the strategies
+    sparsification_strategy: string
+        "threshold" - eliminate element below a certain threshold
+        "keep_n_largest" - keep only n_largest elements in row and column
+    min_nnz (only if make_sparse = True and sparsification_strategy = "keep_n_largest"): int
+        keep n_largest elements in row and column 
+    thr (only if make_sparse = True and sparsification_strategy = "threshold"): float
+        the threshold below which the element is eliminated
     Returns
     -------
     gamma : ndarray, shape (dim_a, dim_b)
@@ -512,39 +565,37 @@ def sinkhorn_epsilon_scaling(C, a, b, eps_fn, max_outer_iter=100, max_inner_iter
     else:
         alpha, beta = warmstart
 
-    loop = 1
     cpt = 0
     err = 1
-    while loop:
+    while True:
         reg_i = eps_fn(cpt)
-        
-        print(reg_i)
 
-        G, log_i = sinkhorn_stabilized_numpy(C, reg_i, a, b,
-                                             max_iter = max_inner_iter, eps=1e-9,
-                                             warmstart=(alpha, beta), verbose=False,
-                                             log_interval=20, tau=tau, log=True)
+        G, log_i = sinkhorn_stabilized(C, reg_i, a, b,
+                                       max_iter = max_inner_iter, tau=tau, tol=1e-9,
+                                       warmstart=(alpha, beta), 
+                                       log=True, verbose=False, log_interval = 20,
+                                       make_sparse = make_sparse, 
+                                       sparsification_strategy = sparsification_strategy, 
+                                       min_nnz = min_nnz, thr = thr)
         
         alpha = log_i['alpha']
         beta = log_i['beta']
+        err = log_i['err'][-1]
 
         if cpt % (log_interval) == 0:  # spsion nearly converged
             # we can speed up the process by checking for the error only all
             # the 10th iterations
-            err = np.linalg.norm(
-                (np.sum(G, axis=0) - b)) ** 2 + np.linalg.norm((np.sum(G, axis=1) - a)) ** 2
             if log:
                 log['err'].append(err)
 
             if verbose:
-                if cpt % (log_interval * 10) == 0:
-                    print(f'iteration {cpt:5d}\terr{err:8e}')
+                print(f'iteration {cpt:5d}\terr{err:8e}')
                     
         if cpt > max_outer_iter:
-            loop = False
+            break
 
-        if err <= eps and cpt > min_outer_iter:
-            loop = False
+        if err <= tol and cpt > min_outer_iter:
+            break
 
         cpt = cpt + 1
 
