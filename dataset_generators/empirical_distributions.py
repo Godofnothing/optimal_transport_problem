@@ -14,18 +14,18 @@ def generate_on_square_grid(num_points, n_x, a_x):
     num_points : int
         number of points
     '''
-    if isinstance(means[-1], np.ndarray):
+    if isinstance(a_x, np.ndarray):
         return np.hstack(
             [a * np.random.randint(low = 0, high = n, size = (num_points, 1)) for n, a in zip(n_x, a_x)]
         )
-    elif isinstance(means[-1], jax.interpreters.xla.DeviceArray):
+    elif isinstance(a_x, jax.interpreters.xla.DeviceArray):
         key = jax.random.PRNGKey(7)
         
         return np.hstack(
             [a * jnp.random.randint(low = 0, high = n, shape = (num_points, 1)) for n, a in zip(n_x, a_x)]
         )
     else:
-         raise NotImplementedError(f"The type {type(means[-1])} is not supported!")
+         raise NotImplementedError(f"The type {type(a_x[-1])} is not supported!")
         
 def make_blobs(num_points, proportions, means, covariances):
     '''

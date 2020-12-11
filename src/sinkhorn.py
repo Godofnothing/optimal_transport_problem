@@ -309,9 +309,9 @@ def sinkhorn_stabilized_numpy(C, reg, a, b, max_iter=1000, tau=1e3, tol=1e-9,
         log dictionary return only if log==True in parameters
     """
     if a is None:
-         a = np.ones((K.shape[0],), dtype=np.float64) / K.shape[0]
+         a = np.ones((С.shape[0],), dtype=np.float64) / С.shape[0]
     if b is None:
-         b = np.ones((K.shape[1],), dtype=np.float64) / K.shape[1]       
+         b = np.ones((С.shape[1],), dtype=np.float64) / С.shape[1]       
 
     # init data
     dim_a = len(a)
@@ -420,9 +420,9 @@ def sinkhorn_stabilized_jax(C, reg, a, b, max_iter=1000, tau=1e3, tol=1e-9,
         log dictionary return only if log==True in parameters
     """
     if a is None:
-         a = jnp.ones((K.shape[0],), dtype = jnp.float32) / K.shape[0]
+         a = jnp.ones((С.shape[0],), dtype = jnp.float32) / С.shape[0]
     if b is None:
-         b = jnp.ones((K.shape[1],), dtype = jnp.float32) / K.shape[1]       
+         b = jnp.ones((С.shape[1],), dtype = jnp.float32) / С.shape[1]       
 
     # init data
     dim_a = len(a)
@@ -503,12 +503,12 @@ def sinkhorn_epsilon_scaling(C, a, b, eps_fn, max_outer_iter=100, min_outer_iter
     ----------
     C : ndarray, shape (dim_a, dim_b)
         loss matrix
-    reg : float
-        Regularization term > 0
     a : ndarray, shape (dim_a,)
         samples weights in the source domain
     b : ndarray, shape (dim_b,)
         samples in the target domain
+    eps_fn : function of callable object
+        the epsilon scaling policy
     max_outer_iter : int, optional
         Max number of iterations
     min_outer_iter: int, optional
@@ -521,13 +521,11 @@ def sinkhorn_epsilon_scaling(C, a, b, eps_fn, max_outer_iter=100, min_outer_iter
         Stop threshol on error (>0)
     warmstart : tuple of vectors
         if given then sarting values for alpha an beta log scalings
-    eps_fn : int, optional
-        the epsilon scaling policy
     log : bool, optional
         record log if True
     verbose : bool, optional
         Print information along iterations
-    Привет, в общем я разобрался log_interval: bool
+    log_interval: bool
         record error each log_interval steps
     make_sparse: bool
         if True create sparse matrix following one of the strategies
