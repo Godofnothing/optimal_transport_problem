@@ -1,4 +1,7 @@
 import matplotlib.pyplot as plt
+from sklearn import manifold
+from scipy.spatial.distance import cdist
+import numpy as np
 
 def imshow_transportation(G, cmap = 'RdBu'):
     '''
@@ -37,3 +40,46 @@ def plot_transportation_2d(x_i, x_f, G, line_color = 'k', src_color = 'blue', ds
         plt.legend(fontsize = 18)
             
     plt.axis("off")
+    
+def plot_text_transportation(s1, s2, s1_vec, s2_vec, G):
+    '''
+    s1: array-like (n, )
+        words from source sentence
+    s2: array-like (m, )
+        words from target sentence
+    s1_vec: ndarray (n, n_features)
+        vectorization of s1
+    s2_vec: ndarray (m, n_features)
+        vectorization of s2        
+    G: ndarray (n, m)
+        the transportation plan
+    '''
+    C = cdist(np.concatenate((s1_vec, s2_vec)),
+              np.concatenate((s1_vec, s2_vec)))
+    
+    nmds = manifold.MDS(
+        2,
+        eps=1e-9,
+        dissimilarity="precomputed",
+        n_init=1)
+    npos = nmds.fit_transform(C)
+    
+    n = s1_vec.shape[0]
+
+    plt.figure(figsize=(6,6))
+    plt.scatter(npos[:n,0],npos[:n,1],c='r',s=50, edgecolor = 'k')
+    for i, txt in enumerate(s1):
+        plt.annotate(txt, (npos[i,0],npos[i,1]),fontsize=20)
+    plt.scatter(npos[n:,0],npos[n:,1],c='b',s=50, edgecolor = 'k')
+    for i, txt in enumerate(s2):
+        plt.annotate(txt, (npos[i+n,0],npos[i+n,1]),fontsize=20)
+
+
+    for i in range(G.shape[0]):
+        for j in range(G.shape[1]):
+            if G[i,j]>1e-5:
+                plt.plot([npos[i,0],npos[j+n,0]],[npos[i,1],npos[j+n,1]],
+                         'k', alpha=G[i,j] / np.max(G))
+
+    plt.axis('off')
+    plt.tight_layout()
