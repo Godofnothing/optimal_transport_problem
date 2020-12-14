@@ -3,6 +3,39 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+def generate_1d_normal_numpy(n_samples, mu = 0.0, sigma = 1.0):
+    '''
+    generate points on the line from normal distribution
+    
+    n_samples : int
+        number of points to be generated
+    mu : float
+        mean of normal distribution
+    sigma : float
+        standard deviation of normal distribution
+    '''
+    X = np.random.normal(loc = mu, scale = sigma, size = n_samples)
+    X.sort()
+    return X[:, None]
+
+def generate_1d_normal_jax(n_samples, mu = 0.0, sigma = 1.0, seed = 7):
+    '''
+    generate points on the line from normal distribution
+    
+    n_samples : int
+        number of points to be generated
+    mu : float
+        mean of normal distribution
+    sigma : float
+        standard deviation of normal distribution
+    seed: int
+        random seed for random number generator
+    '''
+    key = jax.random.PRNGKey(seed)
+    X = mu + sigma * jax.random.normal(key = key, shape = (n_samples,)) 
+    X.sort()
+    return X[:, None]
+
 def generate_on_square_grid(num_points, n_x, a_x):
     '''
     generate points on the square multidimensional grid

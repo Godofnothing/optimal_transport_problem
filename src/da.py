@@ -87,7 +87,7 @@ class SinkhornTransport():
         transp_Xs : array-like, shape (n_source_samples, n_features)
             The transport source samples.
         """
-        transp = self.ot_matrix / np.sum(self.ot_matrix, 1)[:, None]
+        transp = self.ot_matrix / √
         transp[~ np.isfinite(transp)] = 0
         transp_Xs_ = np.dot(transp, self._xt)
             
