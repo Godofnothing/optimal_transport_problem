@@ -1,0 +1,5 @@
+logs_*
+__pycache__
+mnist
+colab_data
+.DS_Store

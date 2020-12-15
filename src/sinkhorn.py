@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path
+from typing import Union
+
 #import numpy 
 import numpy as np
 
@@ -10,7 +14,15 @@ import jax
 import jax.numpy as jnp
 from jax import jit
 
-from utils.sparsify import *
+#import torch
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+DIR_PATH = Path(__file__).parent
+sys.path.append(str(Path(DIR_PATH.parent, 'utils')))
+from sparsify import *
+
 
 def sinkhorn():
     pass
@@ -23,6 +35,9 @@ def get_K(C, reg):
     elif isinstance(C, jax.interpreters.xla.DeviceArray):
         K = jnp.divide(C, -reg)
         return jnp.exp(K)
+    elif isinstance(C, torch.Tensor):
+        K = torch.divide(C, -reg)
+        return torch.exp(K)
     else:
         raise NotImplementedError(f"The type {type(C)} is not supported!")
 
@@ -34,6 +49,9 @@ def get_K_stab(C, alpha, beta, reg):
     elif isinstance(C, jax.interpreters.xla.DeviceArray):
         K = jnp.divide(C - alpha[:, None] - beta[None, :], -reg)
         return jnp.exp(K)
+    elif isinstance(C, torch.Tensor):
+        K = torch.divide(C - alpha[:, None] - beta[None, :], -reg)
+        return torch.exp(K)
     else:
         raise NotImplementedError(f"The type {type(C)} is not supported!")
         
@@ -94,6 +112,12 @@ def sinkhorn_knopp(C, reg, a = None, b = None,
             K = truncate_kernel(K, sparsification_strategy, thr, min_nnz)
                 
         return sinkhorn_knopp_numpy(K, a, b, max_iter, tol, log, verbose, log_interval)
+    elif isinstance(C, torch.Tensor) or isinstance(C, torch.sparse.FloatTensor):
+        K = get_K(C, reg)
+        if make_sparse:
+            K = truncate_kernel(K, sparsification_strategy, thr, min_nnz)
+
+        return sinkhorn_knopp_torch(K, a, b, max_iter, tol, log, verbose, log_interval)
     else:
         raise NotImplementedError(f"The type {type(C)} is not supported!")
         
@@ -115,9 +139,12 @@ def sinkhorn_stabilized(C, reg, a = None, b = None,
     elif isinstance(C, np.ndarray) or isinstance(C, spsp.csr_matrix):
         return sinkhorn_stabilized_numpy(C, reg, a, b, max_iter, tau, tol, warmstart, log, verbose, log_interval, 
                                          make_sparse, sparsification_strategy, min_nnz, thr)
+    elif isinstance(C, torch.Tensor) or isinstance(C, torch.sparse.FloatTensor):
+        return sinkhorn_stabilized_torch(C, reg, a, b, max_iter, tau, tol, warmstart, log, verbose, log_interval, 
+                                         make_sparse, sparsification_strategy, min_nnz, thr)
     else:
         raise NotImplementedError(f"The type {type(C)} is not supported!")
-    
+
 
 def singularity_check_numpy(u, v):
     #check, whether there was a division by zero
@@ -127,6 +154,10 @@ def singularity_check_numpy(u, v):
 def singularity_check_jax(u, v):
     #check, whether there was a division by zero
     return jnp.any(jnp.isnan(u)) or jnp.any(jnp.isnan(v)) or jnp.any(jnp.isinf(u)) or jnp.any(jnp.isinf(v))
+
+def singularity_check_torch(u: torch.Tensor, v: torch.Tensor):
+    #check, whether there was a division by zero
+    return torch.any(torch.isnan(u)) or torch.any(torch.isnan(v)) or torch.any(torch.isinf(u)) or torch.any(torch.isinf(v))
 
 def sinkhorn_knopp_numpy(K, a = None, b = None, max_iter = 1e3, tol = 1e-9, log = False, verbose = False, log_interval = 10):
     r'''
@@ -256,6 +287,76 @@ def sinkhorn_knopp_jax(K, a = None, b = None, max_iter = 1e3, tol = 1e-9, log = 
                  
     #return OT matrix
     ot_matrix = u[:, None] * K * v[None, :]
+    if log:
+        return ot_matrix, log
+    else:
+        return ot_matrix
+
+def sinkhorn_knopp_torch(
+    K: Union[torch.Tensor, torch.sparse.FloatTensor], a: torch.Tensor = None, b: torch.Tensor = None
+    , max_iter: float = 1e3, tol: float = 1e-9, log: bool = False
+    , verbose: bool = False, log_interval: int = 10
+):
+
+    # if the weights are not specified, assign them uniformly
+    if a is None:
+         a = torch.ones((K.shape[0],), dtype=K.dtype, device=K.device) / K.shape[0]
+    if b is None:
+         b = torch.ones((K.shape[1],), dtype=K.dtype, device=K.device) / K.shape[1]       
+
+    # Init data
+    dim_a = len(a)
+    dim_b = len(b)
+    
+    # Set ininital values of u and v
+    u = torch.ones(dim_a, dtype=K.dtype, device=K.device) / dim_a
+    v = torch.ones(dim_b, dtype=K.dtype, device=K.device) / dim_b
+
+    # print(K.device, a.device, b.device, u.device, v.device)
+    
+    err = 1
+    cpt = 0
+    
+    if log:
+        log = {'err' : []}
+        
+    #in order not to calculate each time
+    K_T = K.t()
+    
+    while(err > tol and cpt < max_iter):
+        uprev = u.clone()
+        vprev = v.clone()
+        
+        u = a / (K @ v)
+        v = b / (K_T @ u)
+        
+        if (singularity_check_torch(u, v)):
+            # we have reached the machine precision
+            # come back to previous solution and quit loop
+            print('Warning: numerical errors at iteration', cpt)
+            u = uprev.clone()
+            v = vprev.clone()
+            break
+        if cpt % log_interval == 0:
+            # current approximations
+            a_tilde = u * (K @ v)
+            b_tilde = v * (K_T @ u)
+            # violation of marginals
+            err = torch.linalg.norm(a_tilde - a) + torch.linalg.norm(b_tilde - b)
+            
+            if log:
+                log['err'].append(err)
+            if verbose:
+                print(f"residual norm on iteration {cpt}: {err:.2e}\n")
+        cpt += 1
+                 
+    #return OT matrix
+    if not K.is_sparse:
+        ot_matrix = u[:, None] * K * v[None, :]
+    else:
+        u2 = torch.diag(u)
+        v2 = torch.diag(v)
+        ot_matrix = u2 @ (K @ v2)
     if log:
         return ot_matrix, log
     else:
@@ -486,6 +587,92 @@ def sinkhorn_stabilized_jax(C, reg, a, b, max_iter=1000, tau=1e3, tol=1e-9,
     if log:
         log['alpha'] = alpha + reg * jnp.log(u)
         log['beta']  = beta  + reg * jnp.log(v)
+        return get_Gamma(alpha, beta, u, v), log
+    else:
+        return get_Gamma(alpha, beta, u, v)
+
+
+def sinkhorn_stabilized_torch(C, reg, a, b, max_iter=1000, tau=1e3, tol=1e-9,
+                              warmstart=None, log=False, verbose=False, log_interval=20, 
+                              make_sparse = False, sparsification_strategy = "threshold", 
+                              min_nnz = 5, thr = 1e-10):
+
+    if a is None:
+         a = torch.ones((C.shape[0],), dtype=C.dtype, device=C.device) / C.shape[0]
+    if b is None:
+         b = torch.ones((C.shape[1],), dtype=C.dtype, device=C.device) / C.shape[1]       
+
+    # init data
+    dim_a = len(a)
+    dim_b = len(b)
+
+    cpt = 0
+    if log:
+        log = {'err': []}
+
+    # we assume that no distances are null except those of the diagonal of
+    # distances
+    if warmstart is None:
+        alpha = torch.zeros(dim_a, dtype=C.dtype, device=C.device)
+        beta = torch.zeros(dim_b, dtype=C.dtype, device=C.device)
+    else:
+        alpha, beta = warmstart
+
+    u = torch.ones(dim_a, dtype=C.dtype, device=C.device) / dim_a
+    v = torch.ones(dim_b, dtype=C.dtype, device=C.device) / dim_b
+
+    def get_Gamma(alpha, beta, u, v):
+        """log space gamma computation"""
+        return u[:, None] * get_K_stab(C, alpha, beta, reg) * v[None, :]
+
+    K = get_K_stab(C, alpha, beta, reg)
+    if make_sparse:
+        K = truncate_kernel(K, sparsification_strategy, thr, min_nnz)
+            
+    cpt = 0
+    err = 1
+    while True:
+        uprev = u.clone()
+        vprev = v.clone()
+
+        # sinkhorn update
+        v = b / (K.t() @ u + 1e-16)
+        u = a / (K @ v   + 1e-16)
+
+        #print(np.abs(u).max(), np.abs(v).max(), np.abs(u).min(), np.abs(v).min())
+
+        # absorption iteration
+        if torch.abs(u).max() > tau or torch.abs(v).max() > tau:
+            alpha, beta = alpha + reg * torch.log(u), beta + reg * torch.log(v)
+            u = torch.ones(dim_a, dtype=C.dtype, device=C.device) / dim_a
+            v = torch.ones(dim_b, dtype=C.dtype, device=C.device) / dim_b
+            K = get_K_stab(C, alpha, beta, reg)
+            if make_sparse:
+                K = truncate_kernel(K, sparsification_strategy, thr, min_nnz)
+
+        if cpt % log_interval == 0:
+            # we can speed up the process by checking for the error only log_interval iterations
+            gamma = get_Gamma(alpha, beta, u, v)
+            err = torch.linalg.norm((torch.sum(gamma, dim=0) - b)) + torch.linalg.norm((torch.sum(gamma, dim=1) - a))
+            if log:
+                log['err'].append(err)
+
+        if err <= tol or cpt >= max_iter:
+            break
+
+        if torch.any(torch.isnan(u)) or torch.any(torch.isnan(v)):
+            # we have reached the machine precision
+            # come back to previous solution and quit loop
+            print('Warning: numerical errors at iteration', cpt)
+            u = uprev.clone()
+            v = vprev.clone()
+            break
+
+        cpt = cpt + 1
+        
+    if log:
+        log['alpha'] = alpha + reg * torch.log(u)
+        log['beta']  = beta  + reg * torch.log(v)
         return get_Gamma(alpha, beta, u, v), log
     else:
         return get_Gamma(alpha, beta, u, v)
